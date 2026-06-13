@@ -1,0 +1,6 @@
+Algoritmo,Hipervolume,IGDPlus,Spacing,Pareto Subset,Taxa de Erro
+MEAMT,$1.6762 \pm nan$,$0.0030 \pm nan$,$0.0300 \pm nan$,-,-
+MEAMT-ENXUTO,$1.6846 \pm nan$,$0.0008 \pm nan$,$0.0078 \pm nan$,-,-
+MOEAD,$1.5879 \pm nan$,$0.0954 \pm nan$,$0.0238 \pm nan$,-,-
+NSGA2deap,$1.6859 \pm nan$,$0.0002 \pm nan$,$0.0037 \pm nan$,-,-
+NSGA3,$1.6448 \pm nan$,$0.0095 \pm nan$,$0.2567 \pm nan$,-,-
