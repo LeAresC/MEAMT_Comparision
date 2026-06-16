@@ -2,13 +2,10 @@ import os
 import sys
 import glob
 import pandas as pd
-import seaborn as sns
-import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
 from scipy.spatial.distance import cdist
 import moeabench as mb
-from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
 
 # =======================================================
 # CORREÇÃO DE ROTA (Path Fix)
@@ -56,26 +53,38 @@ def extrair_metadados(nome_arquivo):
     return partes[0], partes[1], int(partes[2].replace('M', '')), int(partes[3].replace('N', ''))
 
 def obter_fronteira_global(exps):
-    """Calcula a fronteira empírica global Z* unindo os resultados de todos os algoritmos"""
+    """
+    Calcula a fronteira empírica global Z* unindo os resultados de todos os algoritmos.
+    Extrai as fronteiras via exp.front() e depois filtra os não dominados globais com Numpy.
+    """
     pool = []
+    
+    # 1. Extrair os pontos não dominados de CADA experimento
     for exp in exps:
         if hasattr(exp, 'runs') and len(exp.runs) > 0:
-            front = exp.front()
-            # CORREÇÃO 1: front já é o SmartArray com os objetivos. 
-            # Verificamos apenas se ele não está vazio.
+            # O exp.front() (ou exp.non_dominated()) obtém a fronteira daquele algoritmo
+            front = exp.front() 
             if front is not None and len(front) > 0:
                 pool.append(np.array(front)) 
             
     if not pool: 
         return np.array([])
     
+    # 2. Unir todas as fronteiras numa matriz única e remover duplicados
     pool = np.vstack(pool)
     pool = np.unique(pool, axis=0)
     
-    nds = NonDominatedSorting()
-    indices_nd = nds.do(pool, only_non_dominated_front=True)
-    
-    return pool[indices_nd]
+    # 3. Filtro de Pareto Global (Minimização) em Numpy puro
+    # Como 'pool' é uma matriz crua (ndarray), aplicamos a máscara vetorial
+    is_efficient = np.ones(pool.shape[0], dtype=bool)
+    for i, c in enumerate(pool):
+        if is_efficient[i]:
+            # Mantém como True apenas os pontos que NÃO são dominados por 'c'
+            is_efficient[is_efficient] = np.any(pool[is_efficient] < c, axis=1)
+            # Garante que o próprio 'c' se mantém na fronteira
+            is_efficient[i] = True
+            
+    return pool[is_efficient]
 
 def compilar_resultados():
     arquivos_zip = glob.glob(os.path.join(PASTA_RESULTADOS, "*.zip"))
