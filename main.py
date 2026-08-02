@@ -23,7 +23,7 @@ SEMENTES = 30
 # Tamanhos bases definidos
 POP_PADRAO = 300            # População para NSGA3, NSGA2, MOEAD
 MIN_TABLES_MEAMT = 30       # Tamanho da tabela do MEAMT normal
-MIN_TABLES_ENXUTO = 100    # Tamanho da tabela do MEAMT enxuto
+MIN_TABLES_ENXUTO = 100     # Tamanho da tabela do MEAMT enxuto
 
 CAMINHO_BASE = "/mnt/steam_ssd/resultados_finais"
 PASTA_RESULTADOS = os.path.expanduser(CAMINHO_BASE)
@@ -31,19 +31,15 @@ os.makedirs(PASTA_RESULTADOS, exist_ok=True)
 
 MAX_WORKERS = 15
 
-# A função agora recebe 'mop' para descobrir o M e gerar as populações exatas
 def get_algoritmos(mop):
     m = mop.M
     
-    # 1. MEAMT Normal: 20 indivíduos por tabela, 2^M tabelas
     pop_meamt = MIN_TABLES_MEAMT * (2 ** m)
     gen_meamt = MAX_FES // pop_meamt
     
-    # 2. MEAMT Enxuto: 100 indivíduos por tabela, M+1 tabelas
     pop_enxuto = MIN_TABLES_ENXUTO * (m + 1)
     gen_enxuto = MAX_FES // pop_enxuto
     
-    # 3. Algoritmos Padrão: População fixa em 300
     gen_padrao = MAX_FES // POP_PADRAO
     
     return [
@@ -57,20 +53,20 @@ def get_algoritmos(mop):
 def get_problemas():
     problemas = []
     
-    #--- A. Suíte DTLZ (3, 5, 10 Objetivos) ---
-    for n_obj in [7]:
+    # --- A. Suíte DTLZ (Restaurei para 3, 5, 7 para capturar o MEAMT quebrado) ---
+    for n_obj in [3, 5, 7]:
        problemas.append(mb.mops.DTLZ1(M=n_obj, N=n_obj + 5 - 1))
        problemas.append(mb.mops.DTLZ2(M=n_obj, N=n_obj + 10 - 1))
        problemas.append(mb.mops.DTLZ3(M=n_obj, N=n_obj + 10 - 1))
        problemas.append(mb.mops.DTLZ4(M=n_obj, N=n_obj + 10 - 1))
         
-    # --- B. Suíte Mochila (30, 50, 100 itens; 2 a 6 Objetivos) ---
+    # --- B. Suíte Mochila (30, 50, 100 itens; 3, 5, 7 Objetivos) ---
     for n_itens in [30, 50, 100]:
         for n_obj in [3, 5, 7]:
             problemas.append(MochilaMultiobjetivo(n_itens=n_itens, n_obj=n_obj))
             
-    # --- C. DPF (3, 5, 10) ---
-    for n_obj in [7]:
+    # --- C. DPF (Restaurei para 3, 5, 7) ---
+    for n_obj in [3, 5, 7]:
          n_var_dpf = n_obj + 20 - 1
          problemas.append(mb.mops.DPF1(M=n_obj, N=n_var_dpf))
          problemas.append(mb.mops.DPF2(M=n_obj, N=n_var_dpf))
@@ -98,41 +94,74 @@ def rodar_experimento_isolado(mop_instance, moea_instance, idx, total_exps):
     caminho_base = os.path.join(PASTA_RESULTADOS, exp.name)
     caminho_zip = f"{caminho_base}.zip"
     
+   # ---------------------------------------------------------
+    # IDENTIFICADOR DE ARQUIVOS CORROMPIDOS (Semente Única)
+    # ---------------------------------------------------------
+    precisa_refazer = False
+    if "Mochila" in nome_mop:
+        precisa_refazer = True
+    elif mop_instance.M == 7:
+        precisa_refazer = True
+    elif nome_moea == "MEAMT": 
+        precisa_refazer = True
+
     if os.path.exists(caminho_zip):
-        return f"⏩ [PULADO] {exp.name} ({idx:03d}/{total_exps:03d}) - Já executado."
+        if precisa_refazer:
+            os.remove(caminho_zip) 
+        else:
+            return f"⏩ [PULADO] {nome_experimento} ({idx:03d}/{total_exps:03d}) - Já validado."
+    # ---------------------------------------------------------
+
+    # 1. O EXPERIMENTO MESTRE (O "cesto" que vai guardar as 30 runs limpas)
+    exp_master = mb.experiment()
+    exp_master.mop = mop_instance
+    exp_master.moea = moea_instance
+    exp_master.name = nome_experimento
+    exp_master._runs = [] # Inicializa a lista de runs completamente vazia
 
     for semente_idx in range(SEMENTES):
-        # Roda estritamente 1 semente de cada vez
-        exp.run(repeat=1, silent=True)
+        # 2. O EXPERIMENTO KAMIKAZE (Nasce, roda 1 vez, é truncado e morre)
+        exp_temp = mb.experiment()
+        exp_temp.mop = mop_instance
+        exp_temp.moea = moea_instance
         
-        # Pega na semente que ACABOU de rodar e decepa o histórico dela imediatamente
-        semente_atual = exp.runs[-1]
+        # Roda a semente atual silenciosamente
+        exp_temp.run(repeat=1, silent=True)
         
+        # Pega a única run gerada por esse experimento temporário
+        semente_atual = exp_temp.runs[-1]
+        
+        # 3. O TRUNCAMENTO IMEDIATO
         if hasattr(semente_atual, '_F_history') and semente_atual._F_history:
             semente_atual._F_history = [semente_atual._F_history[-1]]
             
         if hasattr(semente_atual, '_F_nd_history') and semente_atual._F_nd_history:
             semente_atual._F_nd_history = [semente_atual._F_nd_history[-1]]
             
-        # Deleta as variáveis para sempre
         if hasattr(semente_atual, '_X_history'):
             semente_atual._X_history = []
             
         if hasattr(semente_atual, '_X_nd_history'):
             semente_atual._X_nd_history = []
             
+        # 4. Ajusta o índice para o MoeaBench saber que é a semente 1, 2, 3... e não sempre a 1
+        semente_atual.index = semente_idx + 1
+        
+        # 5. Salva a semente (agora pesando quase zero bytes) no Mestre
+        exp_master._runs.append(semente_atual)
+        
+        # 6. Destrói o Kamikaze e limpa a memória à força
+        del exp_temp
         gc.collect()
 
-    exp.save(caminho_base, mode="all")
+    # 7. Salva o experimento Mestre no disco (um único .zip perfeito com 30 runs!)
+    exp_master.save(caminho_base, mode="all")
     
-    nome_exp_salvo = exp.name
-    
-    del exp
+    del exp_master
     del mop_instance
     del moea_instance
-    gc.collect() 
-    
-    return f"✅ [CONCLUÍDO] {nome_exp_salvo} ({idx:03d}/{total_exps:03d})"
+    gc.collect()
+    return f"✅ [CONCLUÍDO] {nome_experimento} ({idx:03d}/{total_exps:03d})"
 
 
 # ==========================================
@@ -140,21 +169,17 @@ def rodar_experimento_isolado(mop_instance, moea_instance, idx, total_exps):
 # ==========================================
 if __name__ == "__main__":
     mb.system.version(show=True)
-    print(f"\n🚀 Iniciando Otimização Dinâmica em .ZIP (max_tasks_per_child=1)...")
     
-    # 1. Pré-calcular as tarefas para sabermos o total exato
     tarefas_iniciais = []
     problemas = get_problemas()
     
     for mop in problemas:
-        # Aqui, os algoritmos são gerados especificamente para o 'M' deste problema
         algoritmos_adaptados = get_algoritmos(mop)
         for moea in algoritmos_adaptados:
             tarefas_iniciais.append((mop, moea))
             
     total_exps = len(tarefas_iniciais)
     
-    # 2. Formatar as tarefas para o formato final com o idx e total
     tarefas = []
     for idx, (mop, moea) in enumerate(tarefas_iniciais, start=1):
         tarefas.append((mop, moea, idx, total_exps))
@@ -173,4 +198,4 @@ if __name__ == "__main__":
             except Exception as e:
                 tqdm.write(f"❌ [ERRO CRÍTICO] Falha em um experimento: {e}")
 
-    print("\n🎉 Todas as simulações dinâmicas foram concluídas com sucesso!")
+    print("\n🎉 Todas as simulações pendentes foram concluídas e corrigidas com sucesso!")
