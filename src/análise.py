@@ -23,60 +23,48 @@ PASTA_GRAFICOS = "./graficos"
 os.makedirs(PASTA_GRAFICOS, exist_ok=True)
 
 def sanitizar_outliers(exps_dict, Z_ref):
-    """
-    Remove pontos aberrantes (outliers de divergência) para evitar
-    o Colapso de Escala do Hipervolume.
-    O limite é 1.5x o valor do Ponto Nadir da Fronteira Real.
-    """
-    # 1. Encontra o Ponto Nadir (pior valor de cada objetivo) na Fronteira de Referência
     nadir_real = np.max(Z_ref, axis=0)
-    
-    # Se algum eixo do Nadir for 0 ou negativo, adiciona 1 para evitar multiplicar por zero
     nadir_seguro = np.where(nadir_real <= 0, 1.0, nadir_real)
-    
-    # 2. Define o limite de corte (50% a mais do que o limite da fronteira real)
     limite_tolerancia = nadir_seguro * 1.5 
     
-    # 3. Varre todos os algoritmos e suas 30 sementes limpando o lixo
     for nome_alg, exp in exps_dict.items():
         if exp is None or not hasattr(exp, 'runs'): continue
-            
         for run in exp.runs:
             if hasattr(run, '_F_nd_history') and len(run._F_nd_history) > 0:
                 F_atual = np.array(run._F_nd_history[-1])
-                
-                # Se a fronteira estiver vazia, ignora
                 if F_atual.size == 0: continue 
-                
-                # Cria a máscara: O ponto só fica se TODOS os eixos forem <= limite
                 mascara = np.all(F_atual <= limite_tolerancia, axis=1)
-                
-                # Sobrescreve a fronteira só com os pontos saudáveis
                 run._F_nd_history[-1] = F_atual[mascara]
+
 def calcular_spacing(front):
-    """
-    Calcula a métrica de Spacing (SP). Quanto menor, mais uniforme é a distribuição.
-    Utiliza a distância de Manhattan (cityblock) conforme a definição clássica de Schott.
-    """
-    if len(front) < 2: 
-        return 0.0
-    
-    # Calcula a distância entre todos os pares de pontos
+    if len(front) < 2: return 0.0
     dist_matrix = cdist(front, front, metric='cityblock')
-    
-    # Ignora a distância do ponto para ele mesmo
     np.fill_diagonal(dist_matrix, np.inf)
-    
-    # Distância para o vizinho mais próximo de cada ponto
     d_i = dist_matrix.min(axis=1)
-    
-    # Média das distâncias
     d_mean = np.mean(d_i)
+    return np.sqrt(np.sum((d_i - d_mean)**2) / (len(front) - 1))
+
+def calcular_igd_plus_fast(front, Z_ref):
+    """
+    Versão ultrarrápida vetorizada em Numpy para calcular IGD+.
+    Substitui a lentidão do Moeabench em fronteiras divergentes.
+    """
+    if len(front) == 0 or len(Z_ref) == 0:
+        return np.nan
     
-    # Cálculo da variância das distâncias (Fórmula clássica do Spacing)
-    sp = np.sqrt(np.sum((d_i - d_mean)**2) / (len(front) - 1))
+    # Amostragem de segurança para não explodir a memória RAM
+    if len(front) > 1500:
+        front = front[np.random.choice(front.shape[0], 1500, replace=False)]
+    if len(Z_ref) > 1500:
+        Z_ref = Z_ref[np.random.choice(Z_ref.shape[0], 1500, replace=False)]
+        
+    # Broadcasting para distância unilateral (max(a_i - z_i, 0))
+    diff = front[np.newaxis, :, :] - Z_ref[:, np.newaxis, :]
+    diff = np.maximum(diff, 0)
+    dists = np.sqrt(np.sum(diff**2, axis=2))
+    min_dists = np.min(dists, axis=1)
     
-    return sp
+    return np.mean(min_dists)
 
 def extrair_metadados(nome_arquivo):
     nome_sem_ext = os.path.basename(nome_arquivo).replace('.zip', '')
@@ -84,38 +72,35 @@ def extrair_metadados(nome_arquivo):
     return partes[0], partes[1], int(partes[2].replace('M', '')), int(partes[3].replace('N', ''))
 
 def obter_fronteira_global(exps):
-    """
-    Calcula a fronteira empírica global Z* unindo os resultados de todos os algoritmos.
-    Extrai as fronteiras via exp.front() e depois filtra os não dominados globais com Numpy.
-    """
     pool = []
-    
-    # 1. Extrair os pontos não dominados de CADA experimento
     for exp in exps:
         if hasattr(exp, 'runs') and len(exp.runs) > 0:
-            # O exp.front() (ou exp.non_dominated()) obtém a fronteira daquele algoritmo
             front = exp.front() 
             if front is not None and len(front) > 0:
                 pool.append(np.array(front)) 
             
-    if not pool: 
-        return np.array([])
+    if not pool: return np.array([])
     
-    # 2. Unir todas as fronteiras numa matriz única e remover duplicados
     pool = np.vstack(pool)
     pool = np.unique(pool, axis=0)
     
-    # 3. Filtro de Pareto Global (Minimização) em Numpy puro
-    # Como 'pool' é uma matriz crua (ndarray), aplicamos a máscara vetorial
+    # SE A POOL FOR GIGANTE (Comum em M=7), corta para não congelar o Python
+    if pool.shape[0] > 10000:
+        pool = pool[np.random.choice(pool.shape[0], 10000, replace=False)]
+    
     is_efficient = np.ones(pool.shape[0], dtype=bool)
     for i, c in enumerate(pool):
         if is_efficient[i]:
-            # Mantém como True apenas os pontos que NÃO são dominados por 'c'
             is_efficient[is_efficient] = np.any(pool[is_efficient] < c, axis=1)
-            # Garante que o próprio 'c' se mantém na fronteira
             is_efficient[i] = True
             
-    return pool[is_efficient]
+    Z_final = pool[is_efficient]
+    
+    # Limite padrão da literatura para a fronteira final
+    if Z_final.shape[0] > 1500:
+        Z_final = Z_final[np.random.choice(Z_final.shape[0], 1500, replace=False)]
+        
+    return Z_final
 
 def compilar_resultados():
     arquivos_zip = glob.glob(os.path.join(PASTA_RESULTADOS, "*.zip"))
@@ -125,8 +110,7 @@ def compilar_resultados():
     for arq in arquivos_zip:
         prob, alg, m, n = extrair_metadados(arq)
         chave = (prob, m, n)
-        if chave not in grupos:
-            grupos[chave] = []
+        if chave not in grupos: grupos[chave] = []
         grupos[chave].append((alg, arq))
 
     dados_finais = []
@@ -134,20 +118,16 @@ def compilar_resultados():
     for (prob, m, n), lista_arqs in tqdm(grupos.items(), desc="A processar Grupos"):
         exps = {}
         for alg, arq in lista_arqs:
-            if not os.path.exists(arq):
-                continue
-                
+            if not os.path.exists(arq): continue
             caminho_base = arq.replace('.zip', '')
             exp = mb.experiment()
             exp.load(caminho_base)
             exps[alg] = exp
 
-        if not exps: 
-            continue
+        if not exps: continue
 
         # --- ACHAR A FRONTEIRA DE REFERÊNCIA (Z*) ---
         Z_ref = None
-        
         if "Mochila" not in prob and hasattr(mb.mops, prob):
             mop_class = getattr(mb.mops, prob)
             if "DTLZ" in prob:
@@ -158,64 +138,95 @@ def compilar_resultados():
         else:
             Z_ref = obter_fronteira_global(list(exps.values()))
 
-        if Z_ref is None or len(Z_ref) == 0: 
-            continue
+        if Z_ref is None or len(Z_ref) == 0: continue
 
-        sanitizar_outliers(exps, Z_ref)
-        # --- CALCULAR MÉTRICAS ---
+        # =========================================================
+        # 1. CÁLCULO DE MÉTRICAS ROBUSTAS (DADOS BRUTOS)
+        # =========================================================
+        igd_vals_dict = {}
+        spacing_vals_dict = {}
+        pareto_vals_dict = {}
+        erro_vals_dict = {}
+
         for alg, exp in exps.items():
+            igd_vals_dict[alg] = []
+            spacing_vals_dict[alg] = []
+            pareto_vals_dict[alg] = []
+            erro_vals_dict[alg] = []
             
-            hv_matrix = mb.metrics.hv(exp, ref=list(exps.values()), scale='raw', gens=-1)
-            igd_matrix = mb.metrics.igdplus(exp, ref=Z_ref, gens=-1)
-            
-            hv_vals = hv_matrix.gen(-1)
-            igd_vals = igd_matrix.gen(-1)
-            
-            for i, run in enumerate(exp.runs):
-               
+            for run in exp.runs:
                 F_atual = np.array(run.front())
-                pareto_subset, taxa_erro, spacing_val = None, None, None
-                spacing_val = calcular_spacing(F_atual)
                 
-                if "Mochila" in prob and len(F_atual) > 0:
-                    distancias = cdist(F_atual, Z_ref)
+                if len(F_atual) == 0:
+                    igd_vals_dict[alg].append(np.nan)
+                    spacing_vals_dict[alg].append(np.nan)
+                    pareto_vals_dict[alg].append(np.nan)
+                    erro_vals_dict[alg].append(np.nan)
+                    continue
+                
+                # IGD+ customizado e ultrarrápido
+                igd_vals_dict[alg].append(calcular_igd_plus_fast(F_atual, Z_ref))
+                
+                # Para o Spacing, amostragem previne array N^2 de estourar a RAM
+                if len(F_atual) > 1500:
+                    F_sp = F_atual[np.random.choice(F_atual.shape[0], 1500, replace=False)]
+                else:
+                    F_sp = F_atual
+                
+                spacing_vals_dict[alg].append(calcular_spacing(F_sp))
+                
+                if "Mochila" in prob:
+                    distancias = cdist(F_sp, Z_ref)
                     menores = distancias.min(axis=1)
                     pontos_na_fronteira = np.sum(menores < 1e-6)
-                    pareto_subset = pontos_na_fronteira / len(F_atual)
-                    taxa_erro = 1.0 - pareto_subset
+                    p_sub = pontos_na_fronteira / len(F_sp)
+                    pareto_vals_dict[alg].append(p_sub)
+                    erro_vals_dict[alg].append(1.0 - p_sub)
+                else:
+                    pareto_vals_dict[alg].append(None)
+                    erro_vals_dict[alg].append(None)
+
+        # =========================================================
+        # 2. SANITIZAÇÃO DE OUTLIERS
+        # =========================================================
+        sanitizar_outliers(exps, Z_ref)
+
+        # =========================================================
+        # 3. CÁLCULO DO HIPERVOLUME
+        # =========================================================
+        for alg, exp in exps.items():
+            hv_matrix = mb.metrics.hv(exp, ref=list(exps.values()), scale='raw', gens=-1)
+            hv_vals = hv_matrix.gen(-1)
+            
+            for i in range(len(exp.runs)):
+                hv_final = hv_vals[i]
+                if np.isnan(hv_final): hv_final = 0.0
                 
                 dados_finais.append({
                     "Problema": prob, "Algoritmo": alg,
                     "M (Objetivos)": m, "N (Variáveis)": n,
                     "Semente": i + 1,
-                    "Hipervolume": hv_vals[i],
-                    "IGDPlus": igd_vals[i],
-                    "Spacing": spacing_val,
-                    "Pareto Subset": pareto_subset,
-                    "Taxa de Erro": taxa_erro
+                    "Hipervolume": hv_final,
+                    "IGDPlus": igd_vals_dict[alg][i],
+                    "Spacing": spacing_vals_dict[alg][i],
+                    "Pareto Subset": pareto_vals_dict[alg][i],
+                    "Taxa de Erro": erro_vals_dict[alg][i]
                 })
 
     df = pd.DataFrame(dados_finais)
     df.to_csv("resultados_compilados.csv", index=False)
     return df
 
-# ----------------------------------------------------
-# GERAÇÃO DE TABELAS (Padrão Acadêmico - Por Instância)
-# ----------------------------------------------------
 def gerar_tabelas(df):
-    if df.empty: 
-        return
-    
+    if df.empty: return
     print("\nA gerar Tabelas de Resultados Isoladas por Problema...")
     
     metricas = ["Hipervolume", "IGDPlus", "Spacing", "Pareto Subset", "Taxa de Erro"]
     metricas_existentes = [m for m in metricas if df[m].notnull().any()]
     
-    # 1. Agrupa e calcula as estatísticas gerais
     colunas_agrupamento = ["Problema", "M (Objetivos)", "N (Variáveis)", "Algoritmo"]
     resumo = df.groupby(colunas_agrupamento)[metricas_existentes].agg(['mean', 'std'])
     
-    # 2. Formatar os valores para o padrão LaTeX "Média \pm Std"
     df_tabela = pd.DataFrame(index=resumo.index)
     for metrica in metricas_existentes:
         df_tabela[metrica] = resumo[metrica].apply(
@@ -224,13 +235,9 @@ def gerar_tabelas(df):
         )
     
     df_tabela = df_tabela.reset_index()
-    
-    # Encontra todas as combinações únicas de Problema + M + N
     instancias = df_tabela[['Problema', 'M (Objetivos)', 'N (Variáveis)']].drop_duplicates()
-    
     arquivo_tex = "tabelas_artigo.tex"
     
-    # 3. Abre um único arquivo LaTeX e escreve as tabelas separadamente
     with open(arquivo_tex, "w", encoding="utf-8") as f_tex:
         f_tex.write("% =========================================================\n")
         f_tex.write("% COLE ESTE CÓDIGO DIRETAMENTE NO SEU DOCUMENTO LATEX\n")
@@ -242,37 +249,27 @@ def gerar_tabelas(df):
             m = row['M (Objetivos)']
             n = row['N (Variáveis)']
             
-            # Filtra apenas os dados dessa instância específica
             filtro = (df_tabela['Problema'] == prob) & (df_tabela['M (Objetivos)'] == m) & (df_tabela['N (Variáveis)'] == n)
             df_instancia = df_tabela[filtro].copy()
-            
-            # Seleciona apenas a coluna do Algoritmo e as Métricas (oculta Prob, M e N da tabela final)
             df_print = df_instancia[['Algoritmo'] + metricas_existentes]
             
-            # Salva um CSV individual caso você queira abrir no Excel depois
             nome_base = f"{prob}_M{m}_N{n}"
             df_print.to_csv(f"{PASTA_GRAFICOS}/Tabela_{nome_base}.csv", index=False)
             
-            # 4. Geração do Código LaTeX
-            # escape=False garante que o $\pm$ seja interpretado como código matemático e não como texto
             col_format = "l" + "c" * len(metricas_existentes)
             latex_str = df_print.to_latex(index=False, column_format=col_format, escape=False)
             
-            # Adiciona o cabeçalho descritivo da tabela
             f_tex.write(f"% --- Tabela para {prob} (M={m}, N={n}) ---\n")
             f_tex.write("\\begin{table}[htpb]\n")
             f_tex.write("\\centering\n")
             f_tex.write(f"\\caption{{Resultados de desempenho para o problema {prob} ($M={m}$, $N={n}$). Valores expressos em média $\\pm$ desvio padrão sobre 30 execuções independentes.}}\n")
             f_tex.write(f"\\label{{tab:{nome_base}}}\n")
             
-            # Tratamento cosmético para deixar a tabela com visual de artigo "Premium" (estilo booktabs)
             latex_str = latex_str.replace("\\toprule", "\\hline\\hline").replace("\\midrule", "\\hline").replace("\\bottomrule", "\\hline\\hline")
-            
             f_tex.write(latex_str)
             f_tex.write("\\end{table}\n\n")
             
     print(f"✅ Geração concluída! Verifique o arquivo '{arquivo_tex}' na raiz do projeto.")
-
 
 if __name__ == "__main__":
     if os.path.exists("resultados_compilados.csv"):
@@ -281,6 +278,5 @@ if __name__ == "__main__":
     else:
         df_resultados = compilar_resultados()
         
-    # Substitui a chamada dos gráficos pela geração de tabelas
     gerar_tabelas(df_resultados)
     print("Processo totalmente concluído!")
