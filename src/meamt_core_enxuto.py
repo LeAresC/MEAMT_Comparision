@@ -104,7 +104,7 @@ def update_nd_table(tabela_nd, offspring, max_table_size):
             
         tabela_nd.append(offspring)
         
-        if len(tabela_nd) > 300:
+        while len(tabela_nd) > 300:
             tabela_nd.pop(random.randrange(len(tabela_nd))) 
             
     return tabela_nd
