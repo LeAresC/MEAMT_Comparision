@@ -22,6 +22,37 @@ PASTA_RESULTADOS = "/mnt/steam_ssd/resultados_finais"
 PASTA_GRAFICOS = "./graficos"
 os.makedirs(PASTA_GRAFICOS, exist_ok=True)
 
+def sanitizar_outliers(exps_dict, Z_ref):
+    """
+    Remove pontos aberrantes (outliers de divergência) para evitar
+    o Colapso de Escala do Hipervolume.
+    O limite é 1.5x o valor do Ponto Nadir da Fronteira Real.
+    """
+    # 1. Encontra o Ponto Nadir (pior valor de cada objetivo) na Fronteira de Referência
+    nadir_real = np.max(Z_ref, axis=0)
+    
+    # Se algum eixo do Nadir for 0 ou negativo, adiciona 1 para evitar multiplicar por zero
+    nadir_seguro = np.where(nadir_real <= 0, 1.0, nadir_real)
+    
+    # 2. Define o limite de corte (50% a mais do que o limite da fronteira real)
+    limite_tolerancia = nadir_seguro * 1.5 
+    
+    # 3. Varre todos os algoritmos e suas 30 sementes limpando o lixo
+    for nome_alg, exp in exps_dict.items():
+        if exp is None or not hasattr(exp, 'runs'): continue
+            
+        for run in exp.runs:
+            if hasattr(run, '_F_nd_history') and len(run._F_nd_history) > 0:
+                F_atual = np.array(run._F_nd_history[-1])
+                
+                # Se a fronteira estiver vazia, ignora
+                if F_atual.size == 0: continue 
+                
+                # Cria a máscara: O ponto só fica se TODOS os eixos forem <= limite
+                mascara = np.all(F_atual <= limite_tolerancia, axis=1)
+                
+                # Sobrescreve a fronteira só com os pontos saudáveis
+                run._F_nd_history[-1] = F_atual[mascara]
 def calcular_spacing(front):
     """
     Calcula a métrica de Spacing (SP). Quanto menor, mais uniforme é a distribuição.
@@ -130,6 +161,7 @@ def compilar_resultados():
         if Z_ref is None or len(Z_ref) == 0: 
             continue
 
+        sanitizar_outliers(exps, Z_ref)
         # --- CALCULAR MÉTRICAS ---
         for alg, exp in exps.items():
             
