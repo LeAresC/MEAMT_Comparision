@@ -7,12 +7,12 @@ from deap import creator
 
 # Importa as suas funções base do core
 sys.path.append(os.path.abspath("."))
-from src.meamt_core import build_toolbox, gen_inicial_tables, run
+from src.meamt_core_dinamico import build_toolbox, gen_inicial_tables, run
 
-class MEAMT(mb.moeas.BaseMoea):
+class MEAMT_DIN(mb.moeas.BaseMoea):
     def __init__(self, problem=None, population=None, generations=None, seed=None):
         super().__init__(problem, population, generations, seed)
-        self.name = "MEAMT"
+        self.name = "MEAMTDIN"
         
     def evaluation(self):
         # ==========================================
@@ -84,9 +84,10 @@ class MEAMT(mb.moeas.BaseMoea):
             ind.fitness.values = fit
             
         num_tables = 1 << n_obj 
-        max_table_size = max(1, self.population // num_tables)
+        table_size_in = max(1, self.population // num_tables)
+        max_table_size = [table_size_in] * num_tables
         
-        tabelas = gen_inicial_tables(pop_inicial, num_tables, max_table_size, n_obj)
+        tabelas,z_ideal = gen_inicial_tables(pop_inicial, num_tables, max_table_size, n_obj)
         self.tabelas_ref = tabelas 
         
         # Salva o Snapshot da Geração 0
@@ -107,7 +108,8 @@ class MEAMT(mb.moeas.BaseMoea):
             toolbox=toolbox, 
             cxpb=0.9, 
             mutpb=1.0, 
-            n_obj=n_obj
+            n_obj=n_obj,
+            z_ideal=z_ideal
         )
         
         # Extrai o Resultado Final da Tabela ND

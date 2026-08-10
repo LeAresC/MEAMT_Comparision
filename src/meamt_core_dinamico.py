@@ -42,13 +42,13 @@ def build_toolbox(funcao_avaliacao, ind_size, n_pop, n_obj):
 # ==========================================
 # 2. OPERADORES PRINCIPAIS DO MEAMT
 # ==========================================
-def calc_combined_fitness(ind, table_idx, n_obj):
-    """Calcula o fitness combinado de um indivíduo em relação à sua tabela."""
+def calc_combined_fitness(ind, table_idx, n_obj, z_ideal):
+    """Calcula a distância de Tchebycheff combinada para a tabela."""
     fit = 0
     for b in range(n_obj):
         if (table_idx >> b) & 1:
-            fit += ind.fitness.wvalues[n_obj - 1 - b]
-    return -fit
+            fit = max(fit,abs(ind.fitness.values[n_obj - 1 - b] - z_ideal[n_obj - 1 - b]))
+    return fit
 
 def gen_inicial_tables(pop_ini, num_tables, table_size, n_obj):
     """Distribui a população inicial nas tabelas do algoritmo."""
@@ -56,16 +56,18 @@ def gen_inicial_tables(pop_ini, num_tables, table_size, n_obj):
     
     # Tabela 0: ND (Non Dominated)
     fronteira = tools.sortNondominated(pop_ini, len(pop_ini), first_front_only=True)[0]
-    tables[0] = creator.SubPopulation(fronteira[:(min(len(pop_ini), 300))]) 
+    tables[0] = creator.SubPopulation(fronteira[:table_size[0]]) 
     tables[0].score = 0.0
-
+    z_ideal = np.full(n_obj, np.inf)
+    for ind in pop_ini:
+        z_ideal = np.minimum(z_ideal, ind.fitness.values)
     # Tabelas Direcionais
     for i in range(1, num_tables):
-        pop_ordenada = sorted(pop_ini, key=lambda ind: calc_combined_fitness(ind, i, n_obj))
-        tables[i] = creator.SubPopulation(pop_ordenada[:table_size])
+        pop_ordenada = sorted(pop_ini, key=lambda ind: calc_combined_fitness(ind, i, n_obj, z_ideal))
+        tables[i] = creator.SubPopulation(pop_ordenada[:table_size[i]])
         tables[i].score = 0.0
         
-    return tables
+    return tables, z_ideal
 
 def select_parents(tables, num_tables):
     """Seleciona pais baseado no 'score' de sucesso das tabelas."""
@@ -115,12 +117,13 @@ def update_nd_table(tabela_nd, offspring, max_table_size):
             
         tabela_nd.append(offspring)
         
-        while len(tabela_nd) > 300:
-            tabela_nd.pop(random.randrange(len(tabela_nd))) 
+        if len(tabela_nd) > 300:
+           tabela_nd.pop(random.randrange(len(tabela_nd))) 
+             
             
     return tabela_nd
 
-def insert_in_tables(tables, num_tables, off, max_table_size, n_obj):
+def insert_in_tables(tables, num_tables, off, max_table_size, n_obj, z_ideal):
     """Insere o indivíduo gerado nas tabelas apropriadas."""
     # 1. Tenta atualizar a Tabela ND
     tabela_nd = tables[0]
@@ -133,9 +136,11 @@ def insert_in_tables(tables, num_tables, off, max_table_size, n_obj):
 
     # 2. Tenta inserir nas Tabelas Direcionais
     for i in range(1, num_tables):
-        bisect.insort(tables[i], off, key=lambda ind: calc_combined_fitness(ind, i, n_obj))
-    
-        if len(tables[i]) > max_table_size:
+        bisect.insort(tables[i], off, key=lambda ind: calc_combined_fitness(ind, i, n_obj, z_ideal))
+
+        removed_ind = None
+        
+        if len(tables[i]) > max_table_size[i]:
             removed_ind = tables[i].pop() 
         
         # Se sobreviveu ao truncamento, recompensa a tabela do pai
@@ -145,13 +150,12 @@ def insert_in_tables(tables, num_tables, off, max_table_size, n_obj):
 # ==========================================
 # 3. LOOP EVOLUTIVO (O CORAÇÃO DO ALGORITMO)
 # ==========================================
-def run(tables, num_tables, max_table_size, max_fes, avaliacoes_iniciais, toolbox, cxpb, mutpb, n_obj):
+def run(tables, num_tables, max_table_size, max_fes, avaliacoes_iniciais, toolbox, cxpb, mutpb, n_obj, z_ideal):
     """
     A rotina Steady-State do MEA-MT.
     Removidos todos os loggers, pois o MoeaBench rastreia os dados.
     """
     fes_count = avaliacoes_iniciais
-    
     while fes_count < max_fes:
         
         # 1. Seleção
@@ -184,9 +188,10 @@ def run(tables, num_tables, max_table_size, max_fes, avaliacoes_iniciais, toolbo
             fitnesses = toolbox.map(toolbox.evaluate, invalid_ind)
             for ind, fit in zip(invalid_ind, fitnesses):
                  ind.fitness.values = fit
+                 z_ideal = np.minimum(z_ideal, ind.fitness.values)
                  fes_count += 1 
 
         # 5. Inserção Steady-State
         for off in offspring:
-             insert_in_tables(tables, num_tables, off, max_table_size, n_obj)
+             insert_in_tables(tables, num_tables, off, max_table_size, n_obj, z_ideal)
         

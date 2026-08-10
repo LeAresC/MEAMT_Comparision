@@ -38,9 +38,6 @@ class MochilaMultiobjetivo:
         evals_norm = evals / self.max_profits
         F = 1.0 - evals_norm
         
-        # =======================================================
-        # SOLUÇÃO: PENALIDADE SUAVE (SOFT PENALTY)
-        # =======================================================
         # 1. Calcula o excesso de peso (se não estourou, fica 0)
         excesso_peso = np.maximum(0, wgts - self.capacities)
         

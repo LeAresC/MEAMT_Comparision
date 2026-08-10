@@ -47,16 +47,10 @@ def calcular_spacing(front):
 def calcular_igd_plus_fast(front, Z_ref):
     """
     Versão ultrarrápida vetorizada em Numpy para calcular IGD+.
-    Substitui a lentidão do Moeabench em fronteiras divergentes.
+    Cálculo integral, sem limites de amostragem.
     """
     if len(front) == 0 or len(Z_ref) == 0:
         return np.nan
-    
-    # Amostragem de segurança para não explodir a memória RAM
-    if len(front) > 1500:
-        front = front[np.random.choice(front.shape[0], 1500, replace=False)]
-    if len(Z_ref) > 1500:
-        Z_ref = Z_ref[np.random.choice(Z_ref.shape[0], 1500, replace=False)]
         
     # Broadcasting para distância unilateral (max(a_i - z_i, 0))
     diff = front[np.newaxis, :, :] - Z_ref[:, np.newaxis, :]
@@ -72,6 +66,10 @@ def extrair_metadados(nome_arquivo):
     return partes[0], partes[1], int(partes[2].replace('M', '')), int(partes[3].replace('N', ''))
 
 def obter_fronteira_global(exps):
+    """
+    Calcula a fronteira empírica global Z* unindo os resultados.
+    Sem cortes de tamanho, preservando 100% dos pontos não-dominados.
+    """
     pool = []
     for exp in exps:
         if hasattr(exp, 'runs') and len(exp.runs) > 0:
@@ -84,23 +82,13 @@ def obter_fronteira_global(exps):
     pool = np.vstack(pool)
     pool = np.unique(pool, axis=0)
     
-    # SE A POOL FOR GIGANTE (Comum em M=7), corta para não congelar o Python
-    if pool.shape[0] > 10000:
-        pool = pool[np.random.choice(pool.shape[0], 10000, replace=False)]
-    
     is_efficient = np.ones(pool.shape[0], dtype=bool)
     for i, c in enumerate(pool):
         if is_efficient[i]:
             is_efficient[is_efficient] = np.any(pool[is_efficient] < c, axis=1)
             is_efficient[i] = True
             
-    Z_final = pool[is_efficient]
-    
-    # Limite padrão da literatura para a fronteira final
-    if Z_final.shape[0] > 1500:
-        Z_final = Z_final[np.random.choice(Z_final.shape[0], 1500, replace=False)]
-        
-    return Z_final
+    return pool[is_efficient]
 
 def compilar_resultados():
     arquivos_zip = glob.glob(os.path.join(PASTA_RESULTADOS, "*.zip"))
@@ -132,10 +120,12 @@ def compilar_resultados():
             mop_class = getattr(mb.mops, prob)
             if "DTLZ" in prob:
                 k_derivado = n - m + 1
+                # Mantém 1500 apenas para problemas contínuos (onde a fronteira é uma fórmula teórica)
                 Z_ref = mop_class(M=m, K=k_derivado).pf(1500)
             else:
                 Z_ref = mop_class(M=m, N=n).pf(1500)
         else:
+            # Usa a fronteira global empírica INTEGRAL
             Z_ref = obter_fronteira_global(list(exps.values()))
 
         if Z_ref is None or len(Z_ref) == 0: continue
@@ -164,22 +154,18 @@ def compilar_resultados():
                     erro_vals_dict[alg].append(np.nan)
                     continue
                 
-                # IGD+ customizado e ultrarrápido
+                # IGD+ integral
                 igd_vals_dict[alg].append(calcular_igd_plus_fast(F_atual, Z_ref))
                 
-                # Para o Spacing, amostragem previne array N^2 de estourar a RAM
-                if len(F_atual) > 1500:
-                    F_sp = F_atual[np.random.choice(F_atual.shape[0], 1500, replace=False)]
-                else:
-                    F_sp = F_atual
-                
-                spacing_vals_dict[alg].append(calcular_spacing(F_sp))
+                # Spacing integral
+                spacing_vals_dict[alg].append(calcular_spacing(F_atual))
                 
                 if "Mochila" in prob:
-                    distancias = cdist(F_sp, Z_ref)
+                    # Pareto Subset calculado contra 100% da fronteira Z_ref
+                    distancias = cdist(F_atual, Z_ref)
                     menores = distancias.min(axis=1)
                     pontos_na_fronteira = np.sum(menores < 1e-6)
-                    p_sub = pontos_na_fronteira / len(F_sp)
+                    p_sub = pontos_na_fronteira / len(F_atual)
                     pareto_vals_dict[alg].append(p_sub)
                     erro_vals_dict[alg].append(1.0 - p_sub)
                 else:
@@ -272,6 +258,7 @@ def gerar_tabelas(df):
     print(f"✅ Geração concluída! Verifique o arquivo '{arquivo_tex}' na raiz do projeto.")
 
 if __name__ == "__main__":
+    # Remove o CSV antigo se quiser forçar o recálculo bruto
     if os.path.exists("resultados_compilados.csv"):
         print("CSV bruto encontrado. A carregar dados...")
         df_resultados = pd.read_csv("resultados_compilados.csv")
