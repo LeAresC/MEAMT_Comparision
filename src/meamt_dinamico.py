@@ -113,7 +113,7 @@ class MEAMT_DIN(mb.moeas.BaseMoea):
         )
         
         # Extrai o Resultado Final da Tabela ND
-        fronteira_nd = tabelas[0]
+        fronteira_nd = tabelas[2]
         X_final = np.array([list(ind) for ind in fronteira_nd])
         F_final = np.array([ind.fitness.values for ind in fronteira_nd])
         

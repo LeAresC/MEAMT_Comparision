@@ -35,7 +35,7 @@ def build_toolbox(funcao_avaliacao, ind_size, n_pop, n_obj):
     
     toolbox.register("evaluate", funcao_avaliacao) 
     toolbox.register("mate", tools.cxSimulatedBinaryBounded, eta=20.0, low=0.0, up=1.0)
-    toolbox.register("mutate", tools.mutPolynomialBounded, eta=10.0, low=0.0, up=1.0, indpb=1.0/ind_size)
+    toolbox.register("mutate", tools.mutPolynomialBounded, eta=20.0, low=0.0, up=1.0, indpb=1.0/ind_size)
     
     return toolbox
 
@@ -73,8 +73,8 @@ def select_parents(tables, num_tables):
     """Seleciona pais baseado no 'score' de sucesso das tabelas."""
     selected = []
     for _ in range(2):
-        random1 = random.randint(0, num_tables - 1)
-        random2 = random.randint(0, num_tables - 1)
+        random1 = random.randint(1, num_tables - 1)
+        random2 = random.randint(1, num_tables - 1)
 
         if len(tables[random1]) == 0: winner = random2
         elif len(tables[random2]) == 0: winner = random1

@@ -24,7 +24,7 @@ def build_toolbox(funcao_avaliacao, ind_size, n_pop, n_obj):
     
     toolbox.register("evaluate", funcao_avaliacao) 
     toolbox.register("mate", tools.cxSimulatedBinaryBounded, eta=20.0, low=0.0, up=1.0)
-    toolbox.register("mutate", tools.mutPolynomialBounded, eta=10.0, low=0.0, up=1.0, indpb=1.0/ind_size)
+    toolbox.register("mutate", tools.mutPolynomialBounded, eta=20.0, low=0.0, up=1.0, indpb=1.0/ind_size)
     
     return toolbox
 
