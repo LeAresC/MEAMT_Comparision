@@ -3,6 +3,7 @@ import random
 import os
 import sys
 import moeabench as mb
+from moeabench.progress import get_active_pbar
 from deap import creator, tools
 
 # Importa do core ENXUTO
@@ -64,6 +65,10 @@ class MEAMT_ENXUTO(mb.moeas.BaseMoea):
             
             self.fes_gasto += len(individuos_invalidos)
             gen_atual = self.fes_gasto // self.population
+            
+            pbar = get_active_pbar()
+            if pbar:
+                pbar.update_to(gen_atual)
             
             # Gatilho para a foto da geração
             if self.tabelas_ref is not None and gen_atual > self.last_gen_saved:
