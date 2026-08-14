@@ -40,6 +40,8 @@ class MEAMT(mb.moeas.BaseMoea):
         # Variáveis de Estado para o Histórico
         self.F_gens = []
         self.X_gens = []
+        self.F_nd_gens = []
+        self.X_nd_gens = []
         self.tabelas_ref = None       
         self.last_gen_saved = 0       
         self.fes_gasto = 0            
@@ -64,11 +66,17 @@ class MEAMT(mb.moeas.BaseMoea):
             # Lógica de Snapshot (Foto da Geração)
             if self.tabelas_ref is not None and gen_atual > self.last_gen_saved:
                 self.last_gen_saved = gen_atual
+                
+                # 1. População completa (União de todas as tabelas)
                 unicos = {id(ind): ind for t in self.tabelas_ref.values() for ind in t}
                 pop_atual = list(unicos.values())
-                
                 self.X_gens.append(np.array([list(ind) for ind in pop_atual]))
                 self.F_gens.append(np.array([ind.fitness.values for ind in pop_atual]))
+                
+                # 2. Frente Não-Dominada (Tabela 0)
+                nd_atual = list(self.tabelas_ref[0])
+                self.X_nd_gens.append(np.array([list(ind) for ind in nd_atual]))
+                self.F_nd_gens.append(np.array([ind.fitness.values for ind in nd_atual]))
 
             return [tuple(fit) for fit in resultado]
             
@@ -94,11 +102,15 @@ class MEAMT(mb.moeas.BaseMoea):
         tabelas = gen_inicial_tables(pop_inicial, num_tables, max_table_size, n_obj)
         self.tabelas_ref = tabelas 
         
-        # Salva o Snapshot da Geração 0
+        # Salva o Snapshot da Geração 0 (População Geral e Não-Dominados)
         unicos_0 = {id(ind): ind for t in self.tabelas_ref.values() for ind in t}
         pop_0 = list(unicos_0.values())
         self.X_gens.append(np.array([list(ind) for ind in pop_0]))
         self.F_gens.append(np.array([ind.fitness.values for ind in pop_0]))
+        
+        nd_0 = list(self.tabelas_ref[0])
+        self.X_nd_gens.append(np.array([list(ind) for ind in nd_0]))
+        self.F_nd_gens.append(np.array([ind.fitness.values for ind in nd_0]))
 
         avaliacoes_iniciais = len(pop_inicial)
         
@@ -127,8 +139,8 @@ class MEAMT(mb.moeas.BaseMoea):
             self.F_gens,      # 1. Histórico Completo Objetivos (Lista de Arrays)
             self.X_gens,      # 2. Histórico Completo Variáveis (Lista de Arrays)
             F_final,          # 3. Fronteira Final ND (Matriz Numpy)
-            self.F_gens,      # 4. Histórico ND F (Espelhamos o histórico para evitar crash)
-            self.X_gens,      # 5. Histórico ND X
+            self.F_nd_gens,   # 4. Histórico ND F (Tabela 0 / Frente Não-Dominada)
+            self.X_nd_gens,   # 5. Histórico ND X (Tabela 0 / Frente Não-Dominada)
             [np.array([])],   # 6. Histórico Dominados F (Lista com array vazio, exigido pela API)
             [np.array([])]    # 7. Histórico Dominados X (Lista com array vazio)
         )
