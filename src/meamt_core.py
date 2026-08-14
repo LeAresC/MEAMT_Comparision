@@ -39,21 +39,40 @@ def build_toolbox(funcao_avaliacao, ind_size, n_pop, n_obj):
     
     return toolbox
 
-# ==========================================
-# 2. OPERADORES PRINCIPAIS DO MEAMT
-# ==========================================
+# Cache global para as matrizes de máscaras direcionais
+_MASKS_CACHE = {}
+
+def get_table_masks(num_tables, n_obj):
+    """Retorna a matriz de máscaras de bits para combinação de objetivos."""
+    key = (num_tables, n_obj)
+    if key not in _MASKS_CACHE:
+        masks = np.zeros((num_tables, n_obj), dtype=np.float64)
+        for i in range(1, num_tables):
+            for b in range(n_obj):
+                if (i >> b) & 1:
+                    masks[i, n_obj - 1 - b] = 1.0
+        _MASKS_CACHE[key] = masks
+    return _MASKS_CACHE[key]
+
 def calc_combined_fitness(ind, table_idx, n_obj):
-    """Calcula o fitness combinado de um indivíduo em relação à sua tabela."""
-    fit = 0
-    for b in range(n_obj):
-        if (table_idx >> b) & 1:
-            fit += ind.fitness.wvalues[n_obj - 1 - b]
-    return -fit
+    """Calcula ou recupera de forma otimizada o fitness combinado de um indivíduo."""
+    if not hasattr(ind, "_combined_fits"):
+        wval = np.array(ind.fitness.wvalues)
+        num_tables = 1 << n_obj
+        masks = get_table_masks(num_tables, n_obj)
+        ind._combined_fits = -np.dot(masks, wval)
+    return ind._combined_fits[table_idx]
 
 def gen_inicial_tables(pop_ini, num_tables, table_size, n_obj):
     """Distribui a população inicial nas tabelas do algoritmo."""
     tables = dict()
     
+    # Pre-computa fitness combinado para a população inicial
+    masks = get_table_masks(num_tables, n_obj)
+    for ind in pop_ini:
+        wval = np.array(ind.fitness.wvalues)
+        ind._combined_fits = -np.dot(masks, wval)
+
     # Tabela 0: ND (Non Dominated)
     fronteira = tools.sortNondominated(pop_ini, len(pop_ini), first_front_only=True)[0]
     tables[0] = creator.SubPopulation(fronteira[:(min(len(pop_ini), 300))]) 
@@ -61,7 +80,7 @@ def gen_inicial_tables(pop_ini, num_tables, table_size, n_obj):
 
     # Tabelas Direcionais
     for i in range(1, num_tables):
-        pop_ordenada = sorted(pop_ini, key=lambda ind: calc_combined_fitness(ind, i, n_obj))
+        pop_ordenada = sorted(pop_ini, key=lambda ind: ind._combined_fits[i])
         tables[i] = creator.SubPopulation(pop_ordenada[:table_size])
         tables[i].score = 0.0
         
@@ -88,14 +107,17 @@ def select_parents(tables, num_tables):
     return selected
 
 def dominates(ind1, ind2):
-    """Verifica a dominância de Pareto absoluta."""
+    """Verifica a dominância de Pareto absoluta de forma direta e rápida."""
     fit1 = ind1.fitness.wvalues
     fit2 = ind2.fitness.wvalues
     
-    nao_e_pior = all(f1 >= f2 for f1, f2 in zip(fit1, fit2))
-    e_melhor = any(f1 > f2 for f1, f2 in zip(fit1, fit2))
-    
-    return nao_e_pior and e_melhor
+    better = False
+    for f1, f2 in zip(fit1, fit2):
+        if f1 < f2:
+            return False
+        if f1 > f2:
+            better = True
+    return better
 
 def update_nd_table(tabela_nd, offspring, max_table_size):
     """Mantém a tabela 0 rigorosamente não-dominada e limitada."""
@@ -121,6 +143,11 @@ def update_nd_table(tabela_nd, offspring, max_table_size):
 
 def insert_in_tables(tables, num_tables, off, max_table_size, n_obj):
     """Insere o indivíduo gerado nas tabelas apropriadas."""
+    if not hasattr(off, "_combined_fits"):
+        wval = np.array(off.fitness.wvalues)
+        masks = get_table_masks(num_tables, n_obj)
+        off._combined_fits = -np.dot(masks, wval)
+
     # 1. Tenta atualizar a Tabela ND
     tabela_nd = tables[0]
     nova_selecao = update_nd_table(tabela_nd, off, max_table_size)

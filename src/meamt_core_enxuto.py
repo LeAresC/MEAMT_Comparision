@@ -77,14 +77,17 @@ def select_parents(tables, num_tables):
     return selected
 
 def dominates(ind1, ind2):
-    """Verifica a dominância de Pareto absoluta."""
+    """Verifica a dominância de Pareto absoluta de forma direta e rápida."""
     fit1 = ind1.fitness.wvalues
     fit2 = ind2.fitness.wvalues
     
-    nao_e_pior = all(f1 >= f2 for f1, f2 in zip(fit1, fit2))
-    e_melhor = any(f1 > f2 for f1, f2 in zip(fit1, fit2))
-    
-    return nao_e_pior and e_melhor
+    better = False
+    for f1, f2 in zip(fit1, fit2):
+        if f1 < f2:
+            return False
+        if f1 > f2:
+            better = True
+    return better
 
 def update_nd_table(tabela_nd, offspring, max_table_size):
     """Mantém a tabela 0 (ND) rigorosa e limitada."""
