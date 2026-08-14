@@ -3,6 +3,7 @@ import random
 import sys
 import os
 import moeabench as mb
+from moeabench.progress import get_active_pbar
 from deap import creator
 
 # Importa as suas funções base do core
@@ -55,6 +56,10 @@ class MEAMT_DIN(mb.moeas.BaseMoea):
             
             self.fes_gasto += len(individuos_invalidos)
             gen_atual = self.fes_gasto // self.population
+            
+            pbar = get_active_pbar()
+            if pbar:
+                pbar.update_to(gen_atual)
             
             # Lógica de Snapshot (Foto da Geração)
             if self.tabelas_ref is not None and gen_atual > self.last_gen_saved:
