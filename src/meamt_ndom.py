@@ -93,49 +93,36 @@ class MEAMT_NDOM(mb.moeas.BaseMoea):
             ind.fitness.values = fit
             
         # ==========================================
-        # HEURÍSTICA DE ALOCAÇÃO DE POPULAÇÃO
+        # 3. ALOCAÇÃO E INICIALIZAÇÃO DAS TABELAS (Igualitária)
         # ==========================================
         num_tables = 1 << n_obj 
         max_table_size = [0] * num_tables
         
-        # 1. Calcula o "Peso Geométrico" de cada tabela
-        pesos = [0] * num_tables
-        for i in range(1, num_tables):
-            # Conta quantos objetivos estão ativos nesta máscara (k)
-            k = bin(i).count('1') 
-            
-            # Heurística Exponencial: A necessidade de pontos cresce com a dimensão.
-            # Usar base 3 garante que o miolo (k=3) tenha muito mais vagas que as arestas (k=2).
-            pesos[i] = 3 ** k 
-            
-        soma_pesos = sum(pesos)
+        # Divisão igualitária entre todas as tabelas ativas
+        tabelas_ativas = num_tables - 1
+        vagas_por_tabela = self.population // tabelas_ativas
         
-        # 2. Distribui as vagas proporcionalmente ao peso
-        pop_restante = self.population
         for i in range(1, num_tables):
-            # Garante no mínimo 2 vagas (elitismo) para tabelas de vértice (k=1)
-            tamanho = max(2, int((pesos[i] / soma_pesos) * self.population))
-            max_table_size[i] = tamanho
-            pop_restante -= tamanho
+            max_table_size[i] = vagas_por_tabela
             
-        # 3. Correção de Arredondamento
-        # Qualquer sobra populacional vai para a tabela mais exigente (a última: [1,1,1...])
-        max_table_size[num_tables - 1] += pop_restante 
+        # O resto da divisão inteira vai para a tabela global (Tabela 7)
+        max_table_size[-1] += self.population % tabelas_ativas 
         
-        # A nova assinatura retorna apenas as tabelas (sem z_ideal)
         tabelas = gen_inicial_tables(pop_inicial, num_tables, max_table_size, n_obj)
-        self.tabelas_ref = tabelas 
         
-        # Salva o Snapshot da Geração 0
-        unicos_0 = {id(ind): ind for t in self.tabelas_ref.values() for ind in t}
-        pop_0 = list(unicos_0.values())
-        self.X_gens.append(np.array([list(ind) for ind in pop_0]))
-        self.F_gens.append(np.array([ind.fitness.values for ind in pop_0]))
+        # Inicializa a Tabela 0 (Cofre) no Wrapper para o Snapshot 0
+        tabelas[0] = creator.SubPopulation()
+        todas_iniciais = [ind for i in range(1, num_tables) for ind in tabelas[i]]
+        if todas_iniciais:
+            fronts_ini = tools.sortNondominated(todas_iniciais, len(todas_iniciais), first_front_only=True)
+            tabelas[0].extend(fronts_ini[0])
+
+        self.tabelas_ref = tabelas
         
         # ==========================================
-        # 3. MOTOR EVOLUTIVO (Nova Assinatura Geracional)
+        # 4. MOTOR EVOLUTIVO (Nova Assinatura Geracional)
         # ==========================================
-        run(
+        tables = run(
             tables=tabelas, 
             num_tables=num_tables, 
             pop_size=self.population,
@@ -148,29 +135,24 @@ class MEAMT_NDOM(mb.moeas.BaseMoea):
         )
         
         # ==========================================
-        # 4. EXTRAÇÃO DO ARQUIVO GLOBAL (Fronteira 0)
+        # 5. EXTRAÇÃO DO ARQUIVO GLOBAL (Fronteira 0)
         # ==========================================
-        # Agrupa todos os sobreviventes das tabelas direcionais em uma única piscina
-        populacao_final = []
-        for i in range(1, num_tables):
-            populacao_final.extend(tabelas[i])
-            
-        # first_front_only=True garante que pegaremos apenas a fronteira perfeita (Front 0)
-        fronteiras = tools.sortNondominated(populacao_final, len(populacao_final), first_front_only=True)
-        fronteira_nd = fronteiras[0] if fronteiras else []
+        # MUDANÇA ABSOLUTA: Não precisa mais buscar em todas as tabelas nem dar sort.
+        # A Tabela 0 já é o nosso Arquivo Externo Elitista perfeito!
+        arquivo_externo = tables[0]
         
-        X_final = np.array([list(ind) for ind in fronteira_nd])
-        F_final = np.array([ind.fitness.values for ind in fronteira_nd])
+        X_final = np.array([list(ind) for ind in arquivo_externo])
+        F_final = np.array([ind.fitness.values for ind in arquivo_externo])
         
         # ==========================================
-        # 5. CONTRATO DO MOEABENCH: Retorno Exato
+        # 6. CONTRATO DO MOEABENCH: Retorno Exato
         # ==========================================
         return (
-            self.F_gens,      # 1. Histórico Completo Objetivos (Lista de Arrays)
-            self.X_gens,      # 2. Histórico Completo Variáveis (Lista de Arrays)
-            F_final,          # 3. Fronteira Final ND (Matriz Numpy)
-            self.F_gens,      # 4. Histórico ND F (Espelhado para evitar crash)
-            self.X_gens,      # 5. Histórico ND X
-            [np.array([])],   # 6. Histórico Dominados F (Exigido pela API)
-            [np.array([])]    # 7. Histórico Dominados X 
+            self.F_gens,      
+            self.X_gens,      
+            F_final,          
+            self.F_gens,      
+            self.X_gens,      
+            [np.array([])],   
+            [np.array([])]    
         )
