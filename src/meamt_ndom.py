@@ -10,6 +10,64 @@ from deap import creator, tools
 sys.path.append(os.path.abspath("."))
 from src.meamt_core_ndom import build_toolbox, gen_inicial_tables, run
 
+
+def _normalize_constraints(constraints, n_individuals):
+    G = np.asarray(constraints, dtype=float)
+
+    if G.size == 0 and n_individuals > 0:
+        raise ValueError("G vazio para um lote com indivíduos")
+    if G.ndim == 0:
+        if n_individuals != 1:
+            raise ValueError("G escalar só é válido para um indivíduo")
+        G = G.reshape(1, 1)
+    elif G.ndim == 1:
+        if n_individuals == 1:
+            G = G.reshape(1, -1)
+        elif G.shape[0] == n_individuals:
+            G = G.reshape(n_individuals, 1)
+        else:
+            raise ValueError(
+                f"shape de G incompatível: {G.shape} para {n_individuals} indivíduos"
+            )
+    elif G.ndim == 2:
+        if G.shape[0] == n_individuals:
+            pass
+        elif n_individuals > 1 and G.shape == (1, n_individuals):
+            G = G.T
+        else:
+            raise ValueError(
+                f"shape de G incompatível: {G.shape} para {n_individuals} indivíduos"
+            )
+    else:
+        raise ValueError(f"G deve ter no máximo 2 dimensões; recebido ndim={G.ndim}")
+
+    if not np.all(np.isfinite(G)):
+        raise ValueError("G contém valores de restrição não finitos")
+    return G
+
+
+def _normalize_objectives(objectives, n_individuals, n_obj):
+    F = np.asarray(objectives, dtype=float)
+    if F.ndim == 1 and n_individuals == 1:
+        F = F.reshape(1, -1)
+    if F.ndim != 2 or F.shape != (n_individuals, n_obj):
+        raise ValueError(
+            f"shape de F incompatível: {F.shape}; esperado {(n_individuals, n_obj)}"
+        )
+    if not np.all(np.isfinite(F)):
+        raise ValueError("F contém valores de objetivo não finitos")
+    return F
+
+
+def _number_of_constraints(problem):
+    for name in ("get_n_ieq_constr", "n_ieq_constr"):
+        value = getattr(problem, name, None)
+        if value is not None:
+            value = value() if callable(value) else value
+            return int(value)
+    return 0
+
+
 class MEAMT_NDOM(mb.moeas.BaseMoea):
     def __init__(self, problem=None, population=None, generations=None, seed=None):
         super().__init__(problem, population, generations, seed)
@@ -22,6 +80,7 @@ class MEAMT_NDOM(mb.moeas.BaseMoea):
         mop = self.get_problem()
         n_obj = mop.M
         n_var = mop.N
+        n_constraints = _number_of_constraints(mop)
         
         if self.seed is not None:
             np.random.seed(self.seed)
@@ -30,17 +89,18 @@ class MEAMT_NDOM(mb.moeas.BaseMoea):
         def avaliacao_identidade(x):
             return x
         
-        if hasattr(creator, "FitnessMin"):
-            del creator.FitnessMin
-            del creator.Individual
-            del creator.SubPopulation
+        for class_name in ("FitnessMin", "Individual", "SubPopulation"):
+            if hasattr(creator, class_name):
+                delattr(creator, class_name)
 
         # Variáveis de Estado para o Histórico
         self.F_gens = []
         self.X_gens = []
-        self.tabelas_ref = None       
-        self.last_gen_saved = 0       
-        self.fes_gasto = 0            
+        self.F_nd_gens = []
+        self.X_nd_gens = []
+        self.F_dom_gens = []
+        self.X_dom_gens = []
+        self.fes_gasto = 0
 
         # ==========================================
         # 2. CONTRATO DO MOEABENCH: Avaliação Oficial
@@ -50,31 +110,29 @@ class MEAMT_NDOM(mb.moeas.BaseMoea):
             
             # A chamada à evaluation_benchmark é OBRIGATÓRIA.
             # Ela processa penalidades, restrições e conta os FES para o framework.
-            resultado = self.evaluation_benchmark(X_eval)['F']
+            resultado = self.evaluation_benchmark(X_eval)
+            F = _normalize_objectives(
+                resultado["F"], len(individuos_invalidos), n_obj
+            )
+
+            if "G" in resultado:
+                G = _normalize_constraints(
+                    resultado["G"], len(individuos_invalidos)
+                )
+                CV = np.maximum(G, 0.0).sum(axis=1)
+            elif n_constraints > 0:
+                raise ValueError(
+                    "problema restrito não retornou G em evaluation_benchmark"
+                )
+            else:
+                CV = np.zeros(len(individuos_invalidos), dtype=float)
+
+            for ind, cv in zip(individuos_invalidos, CV):
+                ind.fitness.constraint_violation = float(cv)
             
             self.fes_gasto += len(individuos_invalidos)
-            
-            
-            # Na arquitetura geracional, os FES avançam em lotes de ~pop_size
-            gen_atual = self.fes_gasto // self.population
-            
-            pbar = get_active_pbar()
-            if pbar:
-                pbar.update_to(gen_atual)
-                 
-            # Lógica de Snapshot (Foto da Geração para o Histórico)
-            if self.tabelas_ref is not None and gen_atual > self.last_gen_saved:
-                self.last_gen_saved = gen_atual
-                
-                # Coleta todos os indivíduos únicos distribuídos nas tabelas direcionais
-                unicos = {id(ind): ind for t in self.tabelas_ref.values() for ind in t}
-                pop_atual = list(unicos.values())
-                
-                if pop_atual:
-                    self.X_gens.append(np.array([list(ind) for ind in pop_atual]))
-                    self.F_gens.append(np.array([ind.fitness.values for ind in pop_atual]))
 
-            return [tuple(fit) for fit in resultado]
+            return [tuple(fit) for fit in F]
             
         toolbox = build_toolbox(avaliacao_identidade, n_var, self.population, n_obj)
         toolbox.register("map", avaliacao_em_lote)
@@ -109,15 +167,48 @@ class MEAMT_NDOM(mb.moeas.BaseMoea):
         max_table_size[-1] += self.population % tabelas_ativas 
         
         tabelas = gen_inicial_tables(pop_inicial, num_tables, max_table_size, n_obj)
-        
-        # Inicializa a Tabela 0 (Cofre) no Wrapper para o Snapshot 0
-        tabelas[0] = creator.SubPopulation()
-        todas_iniciais = [ind for i in range(1, num_tables) for ind in tabelas[i]]
-        if todas_iniciais:
-            fronts_ini = tools.sortNondominated(todas_iniciais, len(todas_iniciais), first_front_only=True)
-            tabelas[0].extend(fronts_ini[0])
 
-        self.tabelas_ref = tabelas
+        def snapshot_callback(current_tables):
+            unique = {
+                id(ind): ind
+                for table_id in range(1, num_tables)
+                for ind in current_tables[table_id]
+            }
+            population = list(unique.values())
+
+            if population:
+                nd = tools.sortNondominated(
+                    population,
+                    len(population),
+                    first_front_only=True,
+                )[0]
+                nd_ids = {id(ind) for ind in nd}
+                dominated = [ind for ind in population if id(ind) not in nd_ids]
+            else:
+                nd = []
+                dominated = []
+
+            def objective_array(individuals):
+                if not individuals:
+                    return np.zeros((0, n_obj))
+                return np.asarray([ind.fitness.values for ind in individuals])
+
+            def decision_array(individuals):
+                if not individuals:
+                    return np.zeros((0, n_var))
+                return np.asarray([list(ind) for ind in individuals])
+
+            self.F_gens.append(objective_array(population))
+            self.X_gens.append(decision_array(population))
+            self.F_nd_gens.append(objective_array(nd))
+            self.X_nd_gens.append(decision_array(nd))
+            self.F_dom_gens.append(objective_array(dominated))
+            self.X_dom_gens.append(decision_array(dominated))
+
+            pbar = get_active_pbar()
+            if pbar:
+                generation = min(len(self.F_gens) - 1, self.generations)
+                pbar.update_to(generation)
         
         # ==========================================
         # 4. MOTOR EVOLUTIVO (Nova Assinatura Geracional)
@@ -131,7 +222,8 @@ class MEAMT_NDOM(mb.moeas.BaseMoea):
             toolbox=toolbox, 
             cxpb=0.9, 
             mutpb=1.0, 
-            n_obj=n_obj
+            n_obj=n_obj,
+            snapshot_callback=snapshot_callback,
         )
         
         # ==========================================
@@ -141,8 +233,11 @@ class MEAMT_NDOM(mb.moeas.BaseMoea):
         # A Tabela 0 já é o nosso Arquivo Externo Elitista perfeito!
         arquivo_externo = tables[0]
         
-        X_final = np.array([list(ind) for ind in arquivo_externo])
-        F_final = np.array([ind.fitness.values for ind in arquivo_externo])
+        F_final = (
+            np.asarray([ind.fitness.values for ind in arquivo_externo])
+            if arquivo_externo
+            else np.zeros((0, n_obj))
+        )
         
         # ==========================================
         # 6. CONTRATO DO MOEABENCH: Retorno Exato
@@ -151,8 +246,8 @@ class MEAMT_NDOM(mb.moeas.BaseMoea):
             self.F_gens,      
             self.X_gens,      
             F_final,          
-            self.F_gens,      
-            self.X_gens,      
-            [np.array([])],   
-            [np.array([])]    
+            self.F_nd_gens,
+            self.X_nd_gens,
+            self.F_dom_gens,
+            self.X_dom_gens,
         )
