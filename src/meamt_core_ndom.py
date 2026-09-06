@@ -8,9 +8,41 @@ from deap import creator, base, tools
 # 1. SETUP DE CLASSES E TOOLBOX
 # ==========================================
 
+class ConstraintFitness(base.Fitness):
+    """Fitness que aplica constraint-domination sem penalizar objetivos."""
+
+    def __init__(self, values=()):
+        super().__init__(values)
+        self.constraint_violation = 0.0
+
+    def dominates(self, other, obj=slice(None)):
+        self_feasible = self.constraint_violation == 0.0
+        other_feasible = other.constraint_violation == 0.0
+
+        if self_feasible and not other_feasible:
+            return True
+        if not self_feasible and other_feasible:
+            return False
+        if not self_feasible:
+            return self.constraint_violation < other.constraint_violation
+        return super().dominates(other, obj)
+
+    def __eq__(self, other):
+        if not isinstance(other, base.Fitness):
+            return NotImplemented
+        return (
+            self.wvalues == other.wvalues
+            and self.constraint_violation
+            == getattr(other, "constraint_violation", 0.0)
+        )
+
+    def __hash__(self):
+        return hash((self.wvalues, self.constraint_violation))
+
+
 def setup_deap_classes(n_obj):
     if not hasattr(creator, "FitnessMin"):
-        creator.create("FitnessMin", base.Fitness, weights=(-1.0,) * n_obj)
+        creator.create("FitnessMin", ConstraintFitness, weights=(-1.0,) * n_obj)
         creator.create("Individual", list, fitness=creator.FitnessMin, Parent_Table=None)
         creator.create("SubPopulation", list, score=0.0)
 
@@ -36,6 +68,9 @@ def fast_clone(ind):
     new_ind = creator.Individual(ind)              # copia os genes (floats, imutáveis)
     if ind.fitness.valid:
         new_ind.fitness.values = ind.fitness.values
+    new_ind.fitness.constraint_violation = getattr(
+        ind.fitness, "constraint_violation", 0.0
+    )
     new_ind.Parent_Table = ind.Parent_Table
     return new_ind
 
@@ -267,23 +302,39 @@ def insert_in_tables(tables, num_tables, offspring, max_table_size, n_obj):
 # ==========================================
 # 3. LOOP EVOLUTIVO (O CORAÇÃO DO ALGORITMO)
 # ==========================================
-def run(tables, num_tables, pop_size, ngen, max_table_size, toolbox, cxpb, mutpb, n_obj):
+def run(
+    tables,
+    num_tables,
+    pop_size,
+    ngen,
+    max_table_size,
+    toolbox,
+    cxpb,
+    mutpb,
+    n_obj,
+    snapshot_callback=None,
+):
     max_fes = pop_size * ngen
     fes_count = 0
     
     # ==========================================
     # PREPARAÇÃO DO ARQUIVO EXTERNO (TABELA 0)
     # ==========================================
-    if 0 not in tables:
-        tables[0] = creator.SubPopulation()
+    tables[0] = creator.SubPopulation()
         
     # Salva a população inicial na Tabela 0 logo de cara
-    todas_iniciais = []
-    for i in range(1, num_tables):
-        todas_iniciais.extend(tables[i])
+    iniciais_unicos = {
+        id(ind): ind
+        for i in range(1, num_tables)
+        for ind in tables[i]
+    }
+    todas_iniciais = list(iniciais_unicos.values())
     if todas_iniciais:
         fronts_ini = tools.sortNondominated(todas_iniciais, len(todas_iniciais), first_front_only=True)
         tables[0].extend(fronts_ini[0])
+
+    if snapshot_callback is not None:
+        snapshot_callback(tables)
 
     # Loop principal
     while fes_count < max_fes:
@@ -347,5 +398,8 @@ def run(tables, num_tables, pop_size, ngen, max_table_size, toolbox, cxpb, mutpb
             
         # A evolução continua nas tabelas dinâmicas (Tabelas 1 até num_tables-1)
         insert_in_tables(tables, num_tables, offspring, max_table_size, n_obj)
+
+        if snapshot_callback is not None:
+            snapshot_callback(tables)
         
     return tables
