@@ -8,7 +8,7 @@ from deap import creator, tools
 
 # Importa as suas funções base do core
 sys.path.append(os.path.abspath("."))
-from src.meamt_core_ndom import build_toolbox, gen_inicial_tables, run
+from src.meamt_core_ndom import build_toolbox, run_staged_pairs_torneio, run_flat_arquivo_credito_duplo_torneio
 
 
 def _normalize_constraints(constraints, n_individuals):
@@ -69,10 +69,12 @@ def _number_of_constraints(problem):
 
 
 class MEAMT_NDOM(mb.moeas.BaseMoea):
+    janela = 10  # tamanho da sliding window da derivada de score; ajuste se quiser
+
     def __init__(self, problem=None, population=None, generations=None, seed=None):
         super().__init__(problem, population, generations, seed)
         self.name = "MEAMTNDOM"
-        
+
     def evaluation(self):
         # ==========================================
         # 1. CONTRATO DO MOEABENCH: Acesso ao Problema
@@ -81,14 +83,14 @@ class MEAMT_NDOM(mb.moeas.BaseMoea):
         n_obj = mop.M
         n_var = mop.N
         n_constraints = _number_of_constraints(mop)
-        
+
         if self.seed is not None:
             np.random.seed(self.seed)
             random.seed(self.seed)
-            
+
         def avaliacao_identidade(x):
             return x
-        
+
         for class_name in ("FitnessMin", "Individual", "SubPopulation"):
             if hasattr(creator, class_name):
                 delattr(creator, class_name)
@@ -107,7 +109,7 @@ class MEAMT_NDOM(mb.moeas.BaseMoea):
         # ==========================================
         def avaliacao_em_lote(func_dummy, individuos_invalidos):
             X_eval = np.array([list(ind) for ind in individuos_invalidos])
-            
+
             # A chamada à evaluation_benchmark é OBRIGATÓRIA.
             # Ela processa penalidades, restrições e conta os FES para o framework.
             resultado = self.evaluation_benchmark(X_eval)
@@ -129,11 +131,11 @@ class MEAMT_NDOM(mb.moeas.BaseMoea):
 
             for ind, cv in zip(individuos_invalidos, CV):
                 ind.fitness.constraint_violation = float(cv)
-            
+
             self.fes_gasto += len(individuos_invalidos)
 
             return [tuple(fit) for fit in F]
-            
+
         toolbox = build_toolbox(avaliacao_identidade, n_var, self.population, n_obj)
         toolbox.register("map", avaliacao_em_lote)
 
@@ -149,44 +151,30 @@ class MEAMT_NDOM(mb.moeas.BaseMoea):
         fitnesses = toolbox.map(toolbox.evaluate, pop_inicial)
         for ind, fit in zip(pop_inicial, fitnesses):
             ind.fitness.values = fit
-            
-        # ==========================================
-        # 3. ALOCAÇÃO E INICIALIZAÇÃO DAS TABELAS (Igualitária)
-        # ==========================================
-        num_tables = 1 << n_obj 
-        max_table_size = [0] * num_tables
-        
-        # Divisão igualitária entre todas as tabelas ativas
-        tabelas_ativas = num_tables - 1
-        vagas_por_tabela = self.population // tabelas_ativas
-        
-        for i in range(1, num_tables):
-            max_table_size[i] = vagas_por_tabela
-            
-        # O resto da divisão inteira vai para a tabela global (Tabela 7)
-        max_table_size[-1] += self.population % tabelas_ativas 
-        
-        tabelas = gen_inicial_tables(pop_inicial, num_tables, max_table_size, n_obj)
 
+        # ==========================================
+        # 3. CALLBACK DE HISTÓRICO
+        # ==========================================
+        # NOTA: run_staged_pairs constrói e semeia as tabelas por nível
+        # internamente -- não precisamos mais montar max_table_size/
+        # gen_inicial_tables manualmente aqui, e o dict `current_tables`
+        # recebido no callback só contém as máscaras ATIVAS na fase atual
+        # (não necessariamente 1..num_tables-1), mais a chave 0 = arquivo
+        # externo persistente (já elitista, truncado por NSGA2/crowding).
         def snapshot_callback(current_tables):
+            arquivo = current_tables.get(0, [])
+            arquivo_ids = {id(ind) for ind in arquivo}
+
             unique = {
                 id(ind): ind
-                for table_id in range(1, num_tables)
-                for ind in current_tables[table_id]
+                for mask, tbl in current_tables.items()
+                if mask != 0
+                for ind in tbl
             }
             population = list(unique.values())
 
-            if population:
-                nd = tools.sortNondominated(
-                    population,
-                    len(population),
-                    first_front_only=True,
-                )[0]
-                nd_ids = {id(ind) for ind in nd}
-                dominated = [ind for ind in population if id(ind) not in nd_ids]
-            else:
-                nd = []
-                dominated = []
+            nd = list(arquivo)
+            dominated = [ind for ind in population if id(ind) not in arquivo_ids]
 
             def objective_array(individuals):
                 if not individuals:
@@ -209,43 +197,40 @@ class MEAMT_NDOM(mb.moeas.BaseMoea):
             if pbar:
                 generation = min(len(self.F_gens) - 1, self.generations)
                 pbar.update_to(generation)
-        
+
         # ==========================================
-        # 4. MOTOR EVOLUTIVO (Nova Assinatura Geracional)
+        # 4. MOTOR EVOLUTIVO EM ESTÁGIOS (janela de 2 níveis)
         # ==========================================
-        tables = run(
-            tables=tabelas, 
-            num_tables=num_tables, 
-            pop_size=self.population,
-            ngen=self.generations,
-            max_table_size=max_table_size, 
-            toolbox=toolbox, 
-            cxpb=0.9, 
-            mutpb=1.0, 
+        tables = run_flat_arquivo_credito_duplo_torneio(
+            pop_ini=pop_inicial,
             n_obj=n_obj,
+            pop_size=self.population,
+            total_gens=self.generations,
+            toolbox=toolbox,
+            cxpb=0.9,
+            mutpb=1.0,
+            janela=self.janela,
             snapshot_callback=snapshot_callback,
         )
-        
+
         # ==========================================
         # 5. EXTRAÇÃO DO ARQUIVO GLOBAL (Fronteira 0)
         # ==========================================
-        # MUDANÇA ABSOLUTA: Não precisa mais buscar em todas as tabelas nem dar sort.
-        # A Tabela 0 já é o nosso Arquivo Externo Elitista perfeito!
         arquivo_externo = tables[0]
-        
+
         F_final = (
             np.asarray([ind.fitness.values for ind in arquivo_externo])
             if arquivo_externo
             else np.zeros((0, n_obj))
         )
-        
+
         # ==========================================
         # 6. CONTRATO DO MOEABENCH: Retorno Exato
         # ==========================================
         return (
-            self.F_gens,      
-            self.X_gens,      
-            F_final,          
+            self.F_gens,
+            self.X_gens,
+            F_final,
             self.F_nd_gens,
             self.X_nd_gens,
             self.F_dom_gens,
