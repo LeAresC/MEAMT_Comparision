@@ -6,9 +6,9 @@ import moeabench as mb
 from moeabench.progress import get_active_pbar
 from deap import creator, tools
 
-# Importa as suas funções base do core
 sys.path.append(os.path.abspath("."))
-from src.meamt_core_ndom import build_toolbox, run_staged_pairs_torneio, run_flat_arquivo_credito_duplo_torneio
+# ADAPTADO: agora importa do meamt.py unificado, e a entrada e run_tchebycheff
+from src.meamt_core_ndom import build_toolbox, run_tchebycheff, run_cumulativo_desde_nivel1,run_todas_mascaras
 
 
 def _normalize_constraints(constraints, n_individuals):
@@ -66,6 +66,174 @@ def _number_of_constraints(problem):
             value = value() if callable(value) else value
             return int(value)
     return 0
+
+
+class MEAMT_TCHEB(mb.moeas.BaseMoea):
+    janela = 10          # sliding window da derivada de score
+    eta_cx = 2.0         # SBX espalhado: eta alto deixa os filhos colados nos pais
+    usar_grid = False   # True -> densidade por GrEA (mais rapido, pior)
+
+    # Fracao das geracoes para a fase dos VERTICES. Ela e a unica que
+    # converge do zero e precisa de bem mais que as demais -- medido no
+    # DTLZ3: ~500-1500 geracoes para norma ~1.00, contra 80-150 que bastam
+    # nas fases seguintes. Deixe None para usar a fracao abaixo.
+    gens_vertices = None
+    frac_vertices = 0.6
+
+    def __init__(self, problem=None, population=None, generations=None, seed=None):
+        super().__init__(problem, population, generations, seed)
+        self.name = "MEAMTTCHEB"
+
+    def evaluation(self):
+        # ==========================================
+        # 1. CONTRATO DO MOEABENCH: Acesso ao Problema
+        # ==========================================
+        mop = self.get_problem()
+        n_obj = mop.M
+        n_var = mop.N
+        n_constraints = _number_of_constraints(mop)
+
+        if self.seed is not None:
+            np.random.seed(self.seed)
+            random.seed(self.seed)
+
+        def avaliacao_identidade(x):
+            return x
+
+        for class_name in ("FitnessMin", "Individual", "SubPopulation"):
+            if hasattr(creator, class_name):
+                delattr(creator, class_name)
+
+        self.F_gens = []
+        self.X_gens = []
+        self.F_nd_gens = []
+        self.X_nd_gens = []
+        self.F_dom_gens = []
+        self.X_dom_gens = []
+        self.fes_gasto = 0
+
+        # ==========================================
+        # 2. CONTRATO DO MOEABENCH: Avaliação Oficial
+        # ==========================================
+        def avaliacao_em_lote(func_dummy, individuos_invalidos):
+            individuos_invalidos = list(individuos_invalidos)
+            X_eval = np.array([list(ind) for ind in individuos_invalidos])
+
+            resultado = self.evaluation_benchmark(X_eval)
+            F = _normalize_objectives(
+                resultado["F"], len(individuos_invalidos), n_obj
+            )
+
+            if "G" in resultado:
+                G = _normalize_constraints(
+                    resultado["G"], len(individuos_invalidos)
+                )
+                CV = np.maximum(G, 0.0).sum(axis=1)
+            elif n_constraints > 0:
+                raise ValueError(
+                    "problema restrito não retornou G em evaluation_benchmark"
+                )
+            else:
+                CV = np.zeros(len(individuos_invalidos), dtype=float)
+
+            for ind, cv in zip(individuos_invalidos, CV):
+                ind.fitness.constraint_violation = float(cv)
+
+            self.fes_gasto += len(individuos_invalidos)
+            return [tuple(fit) for fit in F]
+
+        toolbox = build_toolbox(avaliacao_identidade, n_var, self.population, n_obj)
+        toolbox.register("map", avaliacao_em_lote)
+
+        # ADAPTADO: run_tchebycheff avalia individuo a individuo (evaluate(ind)),
+        # nao em lote via toolbox.map. Este adaptador mantem a contagem de FES
+        # e o tratamento de restricoes do moeabench para cada avaliacao.
+        def avaliacao_unitaria(ind):
+            return avaliacao_em_lote(None, [ind])[0]
+
+        # ==========================================
+        # 3. CALLBACK DE HISTÓRICO
+        # ==========================================
+        # run_tchebycheff chama o callback a cada geracao das fases
+        # dimensionais, passando as tabelas ATIVAS da fase mais a chave 0 =
+        # arquivo global (elitista, nao-dominado COM restricoes).
+        def snapshot_callback(current_tables):
+            arquivo = current_tables.get(0, [])
+            arquivo_ids = {id(ind) for ind in arquivo}
+
+            unique = {
+                id(ind): ind
+                for mask, tbl in current_tables.items()
+                if mask != 0
+                for ind in tbl
+            }
+            population = list(unique.values())
+
+            nd = list(arquivo)
+            dominated = [ind for ind in population if id(ind) not in arquivo_ids]
+
+            def objective_array(individuals):
+                if not individuals:
+                    return np.zeros((0, n_obj))
+                return np.asarray([ind.fitness.values for ind in individuals])
+
+            def decision_array(individuals):
+                if not individuals:
+                    return np.zeros((0, n_var))
+                return np.asarray([list(ind) for ind in individuals])
+
+            self.F_gens.append(objective_array(population))
+            self.X_gens.append(decision_array(population))
+            self.F_nd_gens.append(objective_array(nd))
+            self.X_nd_gens.append(decision_array(nd))
+            self.F_dom_gens.append(objective_array(dominated))
+            self.X_dom_gens.append(decision_array(dominated))
+
+            pbar = get_active_pbar()
+            if pbar:
+                generation = min(len(self.F_gens) - 1, self.generations)
+                pbar.update_to(generation)
+
+  
+        tables = run_todas_mascaras(
+            n_obj=n_obj,
+            pop_size=self.population,
+            total_gens=self.generations,
+            toolbox=toolbox,
+            evaluate=avaliacao_unitaria,
+            cxpb=0.9,
+            mutpb=1.0,
+            eta_cx=self.eta_cx,
+            janela=self.janela,
+            usar_grid=self.usar_grid,
+            gens_vertices=self.gens_vertices,
+            frac_vertices=self.frac_vertices,
+            snapshot_callback=snapshot_callback,
+        )
+
+        # ==========================================
+        # 5. EXTRAÇÃO DO ARQUIVO GLOBAL (chave 0)
+        # ==========================================
+        arquivo_externo = tables[0]
+
+        F_final = (
+            np.asarray([ind.fitness.values for ind in arquivo_externo])
+            if arquivo_externo
+            else np.zeros((0, n_obj))
+        )
+
+        # ==========================================
+        # 6. CONTRATO DO MOEABENCH: Retorno Exato
+        # ==========================================
+        return (
+            self.F_gens,
+            self.X_gens,
+            F_final,
+            self.F_nd_gens,
+            self.X_nd_gens,
+            self.F_dom_gens,
+            self.X_dom_gens,
+        )
 
 
 class MEAMT_NDOM(mb.moeas.BaseMoea):
@@ -197,11 +365,8 @@ class MEAMT_NDOM(mb.moeas.BaseMoea):
             if pbar:
                 generation = min(len(self.F_gens) - 1, self.generations)
                 pbar.update_to(generation)
-
-        # ==========================================
-        # 4. MOTOR EVOLUTIVO EM ESTÁGIOS (janela de 2 níveis)
-        # ==========================================
-        tables = run_flat_arquivo_credito_duplo_torneio(
+                
+        tables = run_cumulativo_desde_nivel1(
             pop_ini=pop_inicial,
             n_obj=n_obj,
             pop_size=self.population,
